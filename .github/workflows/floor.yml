@@ -1,0 +1,27 @@
+# lane-test's floor (brief landing-lane-2a): a trivial stand-in for the factory's floor, on GitHub-hosted runners (a public repository: no paid minutes).
+# The check "floor (node 26)" has the factory's name, so factory-pr and the ruleset read it the same way. It passes when lane/floor.txt in the judged tree says
+# exactly "pass", and fails otherwise: a PR makes the floor red by writing "fail" there.
+# On purpose, for the test plan: a PR from a branch named skip/... gets the check SKIPPED (GitHub counts a skipped required check as passing on a PR: ADR-45).
+# On merge_group, head_ref is empty, so the queue's run is never skipped.
+name: floor
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+    types: [checks_requested]
+permissions:
+  contents: read
+jobs:
+  floor:
+    name: floor (node 26)
+    if: ${{ !startsWith(github.head_ref, 'skip/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: judge lane/floor.txt in the tested tree
+        run: |
+          git init -q judged && cd judged
+          git fetch -q --depth 1 "https://github.com/${GITHUB_REPOSITORY}" "${GITHUB_SHA}"
+          v="$(git show FETCH_HEAD:lane/floor.txt)"
+          echo "lane/floor.txt at ${GITHUB_SHA} (${GITHUB_EVENT_NAME}): ${v}"
+          [ "${v}" = "pass" ]
