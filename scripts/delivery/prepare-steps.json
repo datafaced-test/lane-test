@@ -1,0 +1,7 @@
+{
+ "v": 1,
+ "steps": [
+  { "id": "floor-file", "owner": "lane-test", "argv": ["sh", "-c", "test \"$(cat lane/floor.txt)\" = pass"], "lock": false }
+ ],
+ "notYet": []
+}
