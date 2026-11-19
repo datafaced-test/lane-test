@@ -1,1 +1,2 @@
 fix: a green PR armed by the fixed auto-merge
+fix: armed while pending
