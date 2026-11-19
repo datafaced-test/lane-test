@@ -1,0 +1,5 @@
+# lane-test (datafaced-test): the rehearsal of the factory's landing lane (brief landing-lane-2a). A PR touching one of these paths needs André's Approve;
+# every other PR lands through the merge queue once "floor (node 26)" passes on the queued tree. The same set as scripts/gate/protected-paths.ts here.
+/.github @dr3dr3
+/scripts/gate @dr3dr3
+/protected @dr3dr3
