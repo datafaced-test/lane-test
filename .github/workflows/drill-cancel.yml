@@ -5,6 +5,7 @@
 # the slot with it: the host log shows when the escaped process stopped, quietpc's history the slot's release and the next mint.
 # The runner group admits this file at refs/heads/main (the third selected-workflow entry). The last job-log line is "DRILL CANCEL REQUESTED …"; the run's
 # conclusion must read cancelled.
+# Host is set by hand: https.request with createConnection and no agent writes `Host: api.github.com:80`, and GitHub answered that 400 (run 45113607722).
 name: drill cancel
 on:
   push:
@@ -44,7 +45,7 @@ jobs:
           const c = http.request({ host: u.hostname, port: u.port, method: "CONNECT", path: "api.github.com:443", timeout: 20000 });
           c.on("connect", (r, sock) => { if (r.statusCode !== 200) { console.log(`proxy-${r.statusCode}`); process.exit(0); }
             const q = https.request({ host: "api.github.com", path, method: "POST", createConnection: () => tls.connect({ socket: sock, servername: "api.github.com" }),
-              headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: "application/vnd.github+json", "user-agent": "lane-test-drill", "content-length": 0 } },
+              headers: { Host: "api.github.com", authorization: `Bearer ${process.env.GH_TOKEN}`, accept: "application/vnd.github+json", "user-agent": "lane-test-drill", "content-length": 0 } },
               (res) => { res.resume(); console.log(String(res.statusCode)); process.exit(0); });
             q.on("error", (e) => { console.log(`error-${e.code ?? "tls"}`); process.exit(0); }); q.end(); });
           c.on("error", (e) => { console.log(`error-${e.code ?? "proxy"}`); process.exit(0); }); c.on("timeout", () => { console.log("timeout"); process.exit(0); }); c.end();
