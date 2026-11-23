@@ -1,0 +1,55 @@
+# lane-test's cancellation drill (brief rehearsal-drills-2026-11-22; ADR-56 test 6, "an ignored cancellation"): the run is cancelled on GitHub while the guest
+# keeps running. The job cancels ITS OWN run through the API, so André does not click; that is why this is its own file, the only drill whose token can
+# write (actions: write, this repository's runs only). A landing on main that changes lane/drill/cancel.txt starts it; a dispatch runs it again.
+# The step ignores INT and TERM and leaves an escaped process (no RUNNER_TRACKING_ID, its own session, deaf to TERM, INT and HUP). The runner must still end,
+# the slot with it: the host log shows when the escaped process stopped, quietpc's history the slot's release and the next mint.
+# The runner group admits this file at refs/heads/main (the third selected-workflow entry). The last job-log line is "DRILL CANCEL REQUESTED …"; the run's
+# conclusion must read cancelled.
+name: drill cancel
+on:
+  push:
+    branches: [main]
+    paths: [lane/drill/cancel.txt]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: drill
+  cancel-in-progress: false
+jobs:
+  cancel:
+    name: drill cancel
+    runs-on: [self-hosted, factory-judge]
+    timeout-minutes: 30
+    steps:
+      - name: ignore the cancellation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e -uo pipefail
+          P1=/proc/1
+          if exec 3> "$P1/fd/1"; then HOSTLOG=yes; else HOSTLOG=no; exec 3> /dev/null; fi
+          host() { printf 'FACTORY-DRILL %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&3 2> /dev/null || true; }
+          echo "drill cancel on runner ${RUNNER_NAME}, run ${GITHUB_RUN_ID}; kernel $(uname -r); host log reachable: ${HOSTLOG}"
+          host "start cancel run ${GITHUB_RUN_ID} runner ${RUNNER_NAME}"
+          [ "$HOSTLOG" = yes ] || { echo "DRILL FAIL cancel: the container's stdout could not be opened from a step (${P1}/fd/1): the escaped lines, this drill's only evidence, would reach nowhere; nothing was cancelled"; exit 1; }
+          env -u RUNNER_TRACKING_ID -u GH_TOKEN setsid bash -c 'trap "" TERM INT HUP; while :; do printf "FACTORY-DRILL %s alive escaped cancel\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&3; sleep 5; done' < /dev/null > /dev/null 2>&1 &
+          echo "an escaped process started: pid $!"
+          trap 'echo "a signal arrived at $(date -u +%H:%M:%SZ): ignored"; host "cancel: a signal ignored"' INT TERM
+          code="$(node - <<'JS'
+          const http = require("node:http"); const https = require("node:https"); const tls = require("node:tls");
+          const u = new URL(process.env.HTTPS_PROXY); const path = `/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/cancel`;
+          const c = http.request({ host: u.hostname, port: u.port, method: "CONNECT", path: "api.github.com:443", timeout: 20000 });
+          c.on("connect", (r, sock) => { if (r.statusCode !== 200) { console.log(`proxy-${r.statusCode}`); process.exit(0); }
+            const q = https.request({ host: "api.github.com", path, method: "POST", createConnection: () => tls.connect({ socket: sock, servername: "api.github.com" }),
+              headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: "application/vnd.github+json", "user-agent": "lane-test-drill", "content-length": 0 } },
+              (res) => { res.resume(); console.log(String(res.statusCode)); process.exit(0); });
+            q.on("error", (e) => { console.log(`error-${e.code ?? "tls"}`); process.exit(0); }); q.end(); });
+          c.on("error", (e) => { console.log(`error-${e.code ?? "proxy"}`); process.exit(0); }); c.on("timeout", () => { console.log("timeout"); process.exit(0); }); c.end();
+          JS
+          )"
+          [ "$code" = 202 ] || { echo "DRILL FAIL cancel: the cancel request was answered ${code:-nothing} (202 expected)"; exit 1; }
+          host "cancel requested (202)"; echo "DRILL CANCEL REQUESTED at $(date -u +%Y-%m-%dT%H:%M:%SZ): this step now ignores INT and TERM"
+          while :; do sleep 1; done
