@@ -1,1 +1,1 @@
-linger
+hold 15
