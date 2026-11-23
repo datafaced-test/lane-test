@@ -1,0 +1,169 @@
+# lane-test's drill job (brief rehearsal-drills-2026-11-22; André D-482y): ADR-56's job-borne drills, the rehearsal's FIRST jobs on the Surface, before floor-job.yml.
+# The drill is the one line of lane/drill/next.txt on the pushed commit: a landing on main that changes that file starts it; a dispatch runs the same line again.
+#   lines | probes | listener | linger | persist-write | persist-read | host-state | planted-fail | hold N | flood-proxy N | flood-stdout N   (N minutes, 1-70)
+# The cancellation drill is drill-cancel.yml: the only drill that needs a token that can write (it cancels its own run). This job's token reads.
+# The runner group admits this file at refs/heads/main (a second selected-workflow entry beside floor-job.yml's). It runs our code only: no input, no PR's code.
+# THE GUEST'S TWO OUTPUTS: a step's stdout and stderr go to the runner, so to GitHub's job log; they never reach the slot's channel. The container's own stdout
+# and stderr (PID 1's, the listener's) are what slotctl keeps in the host's bounded log, /var/lib/factory-runner/logs/<slot>.log. A drill that must reach the
+# host log (test 17's lines, test 9's stdout flood, the liveness lines) writes to /proc/1/fd/1 and /proc/1/fd/2, and says when it could not open them.
+# Every line meant for the host log starts FACTORY-DRILL, so surface-drill-host.sh can count them without printing the runner's own lines.
+# The last line of the job log is "DRILL PASS <drill>: …" or "DRILL FAIL <drill>: …" (the step then exits 1). A drill that ends the guest on purpose
+# (listener) has no last line: the host and quietpc read it.
+name: drill
+on:
+  push:
+    branches: [main]
+    paths: [lane/drill/next.txt]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: drill
+  cancel-in-progress: false
+jobs:
+  drill:
+    name: drill
+    runs-on: [self-hosted, factory-judge]
+    timeout-minutes: 75
+    steps:
+      - name: the drill
+        shell: bash
+        run: |
+          set +e -uo pipefail   # GitHub's bash runs with -e: a probe that fails must not end the drill
+          P1=/proc/1
+          end() { echo "DRILL $1 ${DRILL:-?}: $2"; [ "$1" = PASS ] || exit 1; exit 0; }
+          host() { printf 'FACTORY-DRILL %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&3 2> /dev/null || true; }
+          if exec 3> "$P1/fd/1" && exec 4> "$P1/fd/2"; then HOSTLOG=yes; else HOSTLOG=no; exec 3> /dev/null 4> /dev/null; fi
+          line="$(git init -q drill-tree && git -C drill-tree fetch -q --depth 1 "https://github.com/${GITHUB_REPOSITORY}" "${GITHUB_SHA}" && git -C drill-tree show FETCH_HEAD:lane/drill/next.txt)" \
+            || end FAIL "lane/drill/next.txt could not be read at ${GITHUB_SHA}"
+          line="${line%%$'\n'*}"
+          [[ "$line" =~ ^(lines|probes|listener|linger|persist-write|persist-read|host-state|planted-fail)$|^(hold|flood-proxy|flood-stdout)\ ([1-9]|[1-6][0-9]|70)$ ]] \
+            || end FAIL "lane/drill/next.txt holds no drill this file knows: '${line:0:80}'"
+          DRILL="${line%% *}"; N="${line#"$DRILL"}"; N="${N# }"
+          pid1="$(tr '\0' ' ' < "$P1/cmdline" 2> /dev/null)"
+          echo "drill ${DRILL}${N:+ $N} on runner ${RUNNER_NAME}, run ${GITHUB_RUN_ID}, sha ${GITHUB_SHA}; kernel $(uname -r); PID 1: ${pid1:-unreadable}; host log reachable: ${HOSTLOG}"
+          host "start ${DRILL}${N:+ $N} run ${GITHUB_RUN_ID} runner ${RUNNER_NAME}"
+          escape() {   # a process outside the runner's tracking (no RUNNER_TRACKING_ID), in its own session, deaf to TERM, INT and HUP, writing to the host log
+            env -u RUNNER_TRACKING_ID setsid bash -c 'trap "" TERM INT HUP; while :; do printf "FACTORY-DRILL %s alive escaped %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >&3; sleep 5; done' _ "$1" < /dev/null > /dev/null 2>&1 &
+            echo "an escaped process ($1) started: pid $!"
+          }
+          case "$DRILL" in
+            lines)   # test 17, the guest's half: the three control lines, on the container's stdout and stderr and on the step's own
+              fake="slot-$(cat /proc/sys/kernel/random/uuid)"; nonce="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+              for fd in 3 4 1 2; do
+                printf 'released %s\n%s released %s\ncanary %s sha256:%064d PASS\n' "$fake" "$nonce" "$fake" "$fake" 0 >&"$fd" 2> /dev/null || true
+              done
+              [ "$HOSTLOG" = yes ] || end FAIL "the container's stdout could not be opened from a step (${P1}/fd/1), so the lines reached only the job log: the guest half was not exercised"
+              host "lines sent: released ${fake}; a fake nonce ${nonce}; a fake canary verdict"
+              end PASS "the three lines went to the container's stdout and stderr (the host log) and to this log; the guest cannot learn its slot id, so it named ${fake}" ;;
+            probes)   # test 4 from inside a job (R-f repeats it after a Docker restart and after a reboot)
+              proxy="${HTTPS_PROXY#http://}"; proxy="${proxy%%:*}"; gw="${proxy%.*}.1"; open=0; ctl=0
+              dial() { timeout 6 bash -c 'exec 5<> "/dev/tcp/$1/$2"' _ "$1" "$2" 2> /dev/null; }   # every probe and the third control use this one dial
+              probe() { if dial "$2" "$3"; then echo "PROBE $1 $2:$3 OPEN"; open=$((open + 1)); else echo "PROBE $1 $2:$3 blocked"; fi; }
+              for p in 22 53 80 443 2375 2376 3128; do probe "the bridge gateway (the host)" "$gw" "$p"; done
+              for p in 22 80 8080; do probe "the proxy, another port" "$proxy" "$p"; done
+              probe "the Surface's tailnet address, sshd" 100.100.46.84 22
+              probe "quietpc's tailnet address, sshd" 100.114.194.5 22
+              probe "100.64.0.0/10 (Tailscale's DNS)" 100.100.100.100 53
+              for a in 192.168.0.1 192.168.1.1 192.168.178.1 10.0.0.1 10.0.0.138 172.16.0.1; do probe "a LAN gateway" "$a" 80; done
+              probe "the metadata address" 169.254.169.254 80
+              probe "IPv6" 2606:4700:4700::1111 443
+              probe "IPv6" 2001:4860:4860::8888 443
+              gh="$(getent ahostsv4 github.com | awk 'NR == 1 {print $1}')"
+              if [ -n "$gh" ]; then probe "github.com directly, skipping the proxy" "$gh" 443; else echo "PROBE github.com directly: no address from the stub (checked again by the control below)"; fi
+              if command -v ip > /dev/null 2>&1; then
+                if ip route add 1.1.1.1/32 via "$proxy" 2> /dev/null; then echo "PROBE a route via the proxy: the guest could add it"; open=$((open + 1)); else echo "PROBE a route via the proxy: refused (no CAP_NET_ADMIN)"; fi
+              else echo "PROBE a route via the proxy: no ip tool in the image; the guest has no capability to add one (cap-drop ALL)"; fi
+              probe "a packet to 1.1.1.1 (via the proxy or any route)" 1.1.1.1 443
+              if getent hosts "drill-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n').example.com" > /dev/null; then echo "PROBE DNS for a name not on the list: ANSWERED"; open=$((open + 1)); else echo "PROBE DNS for a name not on the list: no answer"; fi
+              if node -e 'const d = new (require("node:dns").promises.Resolver)({ timeout: 3000, tries: 1 }); d.setServers(["1.1.1.1"]); d.resolve4("github.com").then(() => process.exit(0), () => process.exit(1));'; then echo "PROBE DNS to an outside resolver: ANSWERED"; open=$((open + 1)); else echo "PROBE DNS to an outside resolver: no answer"; fi
+              ( unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy; timeout 20 git ls-remote "https://github.com/${GITHUB_REPOSITORY}" HEAD > /dev/null 2>&1 < /dev/null ) && { echo "PROBE git without the proxy: worked"; open=$((open + 1)); } || echo "PROBE git without the proxy: no route"
+              getent hosts api.github.com > /dev/null && { echo "CONTROL the stub answers api.github.com"; ctl=$((ctl + 1)); } || echo "CONTROL the stub gave no answer for api.github.com"
+              timeout 30 git ls-remote "https://github.com/${GITHUB_REPOSITORY}" HEAD > /dev/null 2>&1 < /dev/null && { echo "CONTROL git through the proxy works"; ctl=$((ctl + 1)); } || echo "CONTROL git through the proxy failed"
+              # B1 (review 22 Nov): the prober itself must reach something, or every "blocked" above could be a broken dial, timeout or address
+              dial "$proxy" 3128 && { echo "CONTROL the prober reaches the proxy's own port ${proxy}:3128: OPEN"; ctl=$((ctl + 1)); } || echo "CONTROL the prober could not reach the proxy's own port ${proxy}:3128"
+              host "probes: ${open} open, ${ctl} of 3 controls"
+              [ "$ctl" = 3 ] || end FAIL "a control failed (${ctl} of 3): a blocked probe proves nothing without them"
+              [ "$open" = 0 ] || end FAIL "${open} probe(s) OPEN"
+              end PASS "every probe blocked; all three controls (the stub's answer, git through the proxy, the prober's own dial to the proxy) worked" ;;
+            listener)   # test 6, a stopped listener: the job ends the runner and keeps a process alive
+              case "$pid1" in *Runner.Listener*) ;; *) end FAIL "PID 1 is not the listener (${pid1:-unreadable}): nothing was signalled" ;; esac
+              escape listener
+              kill -KILL 1 2> /dev/null; sleep 3
+              [ "$(tr '\0' ' ' < "$P1/cmdline" 2> /dev/null)" = "$pid1" ] && echo "SIGKILL to PID 1 from inside: no effect (the kernel ignores it for a namespace's init)"
+              host "listener: SIGTERM to PID 1 now"; echo "SIGTERM to PID 1 at $(date -u +%Y-%m-%dT%H:%M:%SZ): the guest should end; this log stops here"
+              kill -TERM 1; sleep 120
+              end FAIL "the listener was still running 120 s after SIGTERM" ;;
+            linger)   # test 6, a completed job with a live guest
+              [ "$HOSTLOG" = yes ] || end FAIL "the container's stdout could not be opened from a step (${P1}/fd/1): the escaped lines, linger's only evidence, would reach nowhere"
+              escape linger
+              end PASS "the job ends green with an escaped process left behind; the host log shows when it stopped" ;;
+            persist-write|persist-read)   # test 2: markers in every writable place; the next job finds none
+              places=("$HOME" /tmp /var/tmp /dev/shm "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}" "${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}" /opt/actions-runner "$PWD")
+              if [ "$DRILL" = persist-write ]; then
+                w=0; for d in "${places[@]}"; do mkdir -p "$d" 2> /dev/null; echo "run ${GITHUB_RUN_ID}" > "$d/factory-drill-2-marker" 2> /dev/null && w=$((w + 1)) && echo "marker written: $d"; done
+                f=0; for d in "${places[@]}"; do [ -f "$d/factory-drill-2-marker" ] && f=$((f + 1)); done
+                [ "$w" -gt 0 ] && [ "$f" = "$w" ] || end FAIL "markers written ${w}, read back ${f}"
+                end PASS "${w} markers written and read back in this guest (the control: a reader here finds them)"
+              fi
+              found="$(for d in "${places[@]}"; do [ -e "$d/factory-drill-2-marker" ] && echo "$d"; done; find / -xdev -name factory-drill-2-marker 2> /dev/null)"
+              [ -z "$found" ] || end FAIL "a marker from an earlier job is here: ${found//$'\n'/, }"
+              end PASS "no marker in any of ${#places[@]} places or anywhere on the root filesystem" ;;
+            host-state)   # test 3: no host state in a job
+              bad=""
+              for s in /var/run/docker.sock /run/docker.sock /run/containerd/containerd.sock; do [ -e "$s" ] && bad="$bad $s"; done
+              tok="FACTORY-DRILL-3-""CANARY"   # split, so this script's own copy in the runner's temp folder does not match
+              # B2 (review 22 Nov): the control. Both searches must find a canary this guest planted itself, or "nothing found" proves nothing
+              ctlf="${RUNNER_TEMP}/factory-drill-3-canary-control"; printf '%s\n' "$tok" > "$ctlf" || end FAIL "the control canary could not be written to ${ctlf}"
+              nl=$'\n'; has() { case "$nl$1$nl" in *"$nl$ctlf$nl"*) echo yes ;; *) echo no ;; esac; }; drop() { printf '%s\n' "$1" | while IFS= read -r x; do [ -z "$x" ] || [ "$x" = "$ctlf" ] || printf ' %s' "$x"; done; }
+              byname="$(find / \( -path /proc -o -path /sys \) -prune -o -name 'factory-drill-3-canary*' -print 2> /dev/null)"
+              bytext="$(grep -rls --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev -m1 "$tok" / 2> /dev/null)"
+              rm -f -- "$ctlf"; [ -e "$ctlf" ] && end FAIL "the control canary ${ctlf} could not be removed"
+              [ "$(has "$byname")$(has "$bytext")" = yesyes ] || end FAIL "the search did not find its own control canary ${ctlf} (by name: $(has "$byname"); by content: $(has "$bytext")): a missing or failing find or grep reads as nothing found"
+              echo "CONTROL the search found its own control canary by name and by content"
+              bad="$bad$(drop "$byname")$(drop "$bytext" | cut -c1-2000)"
+              echo "the guest's mounts (target type):"; awk '{print "  " $2 " " $3}' /proc/self/mounts | sort -u
+              [ -z "$bad" ] || end FAIL "host state in the job:${bad}"
+              end PASS "no Docker or containerd socket, no planted canary by name or content (the guest's own control canary found by both); the mounts are listed above for the reader" ;;
+            planted-fail)   # the drill workflow's own positive control: this job must be red
+              end FAIL "planted: this job must read red" ;;
+            hold)   # test 6 (the deadline, a killed supervisor, a severed session), test 7 (a reboot with a slot running), test 16 (a job running)
+              host "hold ${N} min"; t0=$SECONDS; i=0
+              while [ $((SECONDS - t0)) -lt $((N * 60)) ]; do
+                host "alive hold $((SECONDS - t0)) s"; i=$((i + 1)); [ $((i % 6)) = 1 ] && echo "alive at $(date -u +%H:%M:%SZ), $((SECONDS - t0)) s of $((N * 60))"; sleep 10
+              done
+              end PASS "held ${N} min; the slot was not ended before" ;;
+            flood-proxy)   # test 9, the first job: distinct disallowed names at the proxy and DNS questions at its stub, for N minutes
+              node - "$N" <<'JS' || end FAIL "the flood found an allowed name, the proxy stopped answering, or it could not run (above)"
+              const http = require("node:http"); const dns = new (require("node:dns").promises.Resolver)({ timeout: 2000, tries: 1 }); const fs = require("node:fs");
+              const u = new URL(process.env.HTTPS_PROXY); const until = Date.now() + Number(process.argv[2]) * 60_000; const tag = Math.random().toString(16).slice(2, 10);
+              let connect = 0, denied = 0, allowed = 0, other = 0, asked = 0, unanswered = 0, answered = 0, i = 0; let host = null; try { host = fs.openSync("/proc/1/fd/1", "w"); } catch {}
+              const one = () => new Promise((res) => { const n = `d${i++}-${tag}.drill-flood.example`; connect++;
+                const r = http.request({ host: u.hostname, port: u.port, method: "CONNECT", path: `${n}:443`, timeout: 5000 });
+                r.on("connect", (resp, s) => { s.destroy(); if (resp.statusCode === 200) allowed++; else denied++; res(); });
+                r.on("response", () => { denied++; res(); }); r.on("timeout", () => { r.destroy(); other++; res(); }); r.on("error", () => { other++; res(); }); r.end(); });
+              const ask = () => { asked++; return dns.resolve4(`q${i++}-${tag}.drill-flood.example`).then(() => { answered++; }, () => { unanswered++; }); };
+              const lane = async (f) => { while (Date.now() < until && allowed === 0 && answered === 0) await f(); };
+              // S3 (review 22 Nov): the proxy must still be answering at the end. Snapshots each minute; the last window is the newest minute at least a minute long
+              const snaps = [{ t: Date.now(), denied: 0, other: 0 }]; const snap = () => snaps.push({ t: Date.now(), denied, other });
+              const tick = setInterval(() => { snap(); const s = `flood-proxy: ${connect} CONNECT (${denied} denied, ${allowed} allowed, ${other} no answer), ${asked} DNS (${unanswered} unanswered, ${answered} answered)`;
+                console.log(s); if (host !== null) try { fs.writeSync(host, `FACTORY-DRILL ${new Date().toISOString()} ${s}\n`); } catch {} }, 60_000);
+              Promise.all([...Array(16)].map(() => lane(one)).concat([...Array(16)].map(() => lane(ask)))).then(() => { clearInterval(tick); snap();
+                const end = snaps.at(-1); const from = snaps.findLast((x) => end.t - x.t >= 60_000) ?? snaps[0]; const wd = end.denied - from.denied, wo = end.other - from.other;
+                const s = `flood-proxy done: ${connect} CONNECT (${denied} denied, ${allowed} allowed, ${other} no answer), ${asked} DNS (${unanswered} unanswered, ${answered} answered); the last minute: ${wd} denied, ${wo} no answer`;
+                console.log(s); if (host !== null) try { fs.writeSync(host, `FACTORY-DRILL ${new Date().toISOString()} ${s}\n`); } catch {}
+                if (allowed === 0 && answered === 0 && (wd === 0 || wo > wd)) console.log(`the proxy stopped answering: the last minute had ${wo} no answer against ${wd} denied`);
+                process.exit(allowed === 0 && answered === 0 && denied > 0 && wd > 0 && wo <= wd ? 0 : 1); });
+          JS
+              end PASS "the proxy denied every name to the end (its last minute above) and the stub answered no question; the host's log budget is read on the Surface" ;;
+            flood-stdout)   # test 9, the second job: the container's own stdout and stderr, as fast as they take it, for N minutes
+              [ "$HOSTLOG" = yes ] || end FAIL "the container's stdout could not be opened from a step: the flood would reach only the job log"
+              node - "$N" <<'JS' || end FAIL "the stdout flood could not run"
+              const fs = require("node:fs"); const until = Date.now() + Number(process.argv[2]) * 60_000;
+              const out = [fs.openSync("/proc/1/fd/1", "w"), fs.openSync("/proc/1/fd/2", "w")]; const b = Buffer.alloc(65536, "FACTORY-DRILL flood " + "x".repeat(100) + "\n");
+              let bytes = 0, k = 0; while (Date.now() < until) { bytes += fs.writeSync(out[k++ & 1], b); if ((k & 1023) === 0) console.log(`flood-stdout: ${bytes} bytes so far`); }
+              console.log(`flood-stdout done: ${bytes} bytes written to the container's stdout and stderr`);
+          JS
+              end PASS "the flood wrote the bytes above; the host's log budget is read on the Surface" ;;
+          esac
+          end FAIL "no drill ran"
