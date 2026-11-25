@@ -1,1 +1,2 @@
 C6 probe, 25 Nov 2026: a push to an approved PR dismisses the approval (D-626).
+TEST by Andre
